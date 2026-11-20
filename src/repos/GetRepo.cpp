@@ -153,6 +153,36 @@ std::vector<std::unique_ptr<Package>> GetRepo::loadPackages()
 		if (cur.HasMember("screens"))
 			package->screens = cur["screens"].GetInt();
 
+		const Value* depsVal = nullptr;
+		if (cur.HasMember("depends"))
+			depsVal = &cur["depends"];
+		else if (cur.HasMember("dependencies"))
+			depsVal = &cur["dependencies"];
+		if (depsVal != nullptr)
+		{
+			if (depsVal->IsArray())
+			{
+				for (SizeType j = 0; j < depsVal->Size(); j++)
+				{
+					const auto& dep = (*depsVal)[j];
+					if (dep.IsString())
+						package->dependencies.push_back({dep.GetString(), "*"});
+				}
+			}
+			else if (depsVal->IsObject())
+			{
+				for (auto it = depsVal->MemberBegin(); it != depsVal->MemberEnd(); ++it)
+				{
+					if (!it->name.IsString())
+						continue;
+					std::string versionConstraint = "*";
+					if (it->value.IsString())
+						versionConstraint = it->value.GetString();
+					package->dependencies.push_back({it->name.GetString(), versionConstraint});
+				}
+			}
+		}
+
 		result.push_back(std::move(package));
 	}
 	return result;

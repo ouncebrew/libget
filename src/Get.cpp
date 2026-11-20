@@ -53,7 +53,64 @@ Get::Get(
 	}
 }
 
-int Get::install(Package& package, bool resume)
+std::shared_ptr<Package> Get::findPackage(const std::string& pkg_name)
+{
+	for (auto& cur : packages)
+	{
+		if (cur && cur->getPackageName() == pkg_name)
+			return cur;
+	}
+	return nullptr;
+}
+
+bool Get::resolveDependencies(
+	const std::string& pkg_name,
+	std::vector<std::string>& order,
+	std::unordered_set<std::string>& visiting,
+	std::unordered_set<std::string>& visited,
+	std::string& error)
+{
+	if (visited.find(pkg_name) != visited.end())
+		return true;
+	if (visiting.find(pkg_name) != visiting.end())
+	{
+		error = "Dependency cycle detected involving package '" + pkg_name + "'";
+		return false;
+	}
+
+	auto pkg = findPackage(pkg_name);
+	if (!pkg)
+	{
+		error = "Package '" + pkg_name + "' not found in enabled repos";
+		return false;
+	}
+
+	visiting.insert(pkg_name);
+	for (const auto& dep : pkg->getDependencies())
+	{
+		if (dep.name.empty())
+			continue;
+		auto depPkg = findPackage(dep.name);
+		if (!depPkg)
+		{
+			error = "Package '" + pkg_name + "' depends on missing package '" + dep.name + "'";
+			return false;
+		}
+		if (!versionSatisfies(depPkg->getVersion(), dep.version))
+		{
+			error = "Package '" + pkg_name + "' requires dependency '" + dep.name + "' with version constraint '" + dep.version + "', but available version is '" + depPkg->getVersion() + "'";
+			return false;
+		}
+		if (!resolveDependencies(dep.name, order, visiting, visited, error))
+			return false;
+	}
+	visiting.erase(pkg_name);
+	visited.insert(pkg_name);
+	order.push_back(pkg_name);
+	return true;
+}
+
+int Get::installSingle(Package& package, bool resume)
 {
 	// found package in a remote server, fetch it
 	bool located = package.downloadZip(mTmp_path, nullptr, resume);
@@ -67,7 +124,11 @@ int Get::install(Package& package, bool resume)
 	}
 
 	// install the package, (extracts manifest, etc)
-	package.install(mPkg_path, mTmp_path);
+	if (!package.install(mPkg_path, mTmp_path))
+	{
+		printf("--> Error installing [%s]\n", package.getPackageName().c_str());
+		return false;
+	}
 
 	printf("--> Downloaded [%s] to sdroot/\n", package.getPackageName().c_str());
 
@@ -82,9 +143,56 @@ int Get::install(Package& package, bool resume)
 	return true;
 }
 
+int Get::install(Package& package, bool resume)
+{
+	std::vector<std::string> order;
+	std::unordered_set<std::string> visiting;
+	std::unordered_set<std::string> visited;
+	std::string error;
+	std::string rootName = package.getPackageName();
+
+	if (!resolveDependencies(rootName, order, visiting, visited, error))
+	{
+		printf("--> %s\n", error.c_str());
+		return false;
+	}
+
+	for (const auto& name : order)
+	{
+		auto cur = findPackage(name);
+		if (!cur)
+		{
+			printf("--> Package '%s' not found in enabled repos\n", name.c_str());
+			return false;
+		}
+
+		bool isRoot = (name == rootName);
+		if (!isRoot)
+		{
+			int status = cur->getStatus();
+			if (status == INSTALLED || status == LOCAL)
+			{
+				printf("--> Dependency [%s] already satisfied (%s, version %s)\n", name.c_str(), cur->statusString(), cur->getVersion().c_str());
+				continue;
+			}
+			printf("--> Installing dependency [%s] (version %s)...\n", name.c_str(), cur->getVersion().c_str());
+		}
+
+		// only pass resume to the explicitly requested package
+		if (!installSingle(*cur, isRoot ? resume : false))
+			return false;
+	}
+
+	return true;
+}
+
 int Get::remove(Package& package)
 {
-	package.remove(mPkg_path);
+	if (!package.remove(mPkg_path))
+	{
+		printf("--> Error removing [%s] package\n", package.getPackageName().c_str());
+		return false;
+	}
 	printf("--> Uninstalled [%s] package\n", package.getPackageName().c_str());
 	update();
 

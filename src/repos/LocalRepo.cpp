@@ -93,6 +93,36 @@ std::vector<std::unique_ptr<Package>> LocalRepo::loadPackages()
 					{
 						pkg->changelog = doc["changelog"].GetString();
 					}
+
+					const rapidjson::Value* depsVal = nullptr;
+					if (doc.HasMember("depends"))
+						depsVal = &doc["depends"];
+					else if (doc.HasMember("dependencies"))
+						depsVal = &doc["dependencies"];
+					if (depsVal != nullptr)
+					{
+						if (depsVal->IsArray())
+						{
+							for (rapidjson::SizeType j = 0; j < depsVal->Size(); j++)
+							{
+								const auto& dep = (*depsVal)[j];
+								if (dep.IsString())
+									pkg->dependencies.push_back({dep.GetString(), "*"});
+							}
+						}
+						else if (depsVal->IsObject())
+						{
+							for (auto it = depsVal->MemberBegin(); it != depsVal->MemberEnd(); ++it)
+							{
+								if (!it->name.IsString())
+									continue;
+								std::string versionConstraint = "*";
+								if (it->value.IsString())
+									versionConstraint = it->value.GetString();
+								pkg->dependencies.push_back({it->name.GetString(), versionConstraint});
+							}
+						}
+					}
 				}
 
 				pkg->status = LOCAL;

@@ -40,6 +40,7 @@
 #include <unistd.h>
 #include <iomanip>
 #include <locale>
+#include <vector>
 
 #include "Utils.hpp"
 
@@ -761,4 +762,62 @@ std::string getHumanReadableBytes(uint64_t bytes)
 	ss.precision(places);
 	ss << std::fixed << size << " " << suffixes[suffix];
 	return ss.str();
+}
+
+static std::string trimCopy(const std::string& s)
+{
+	const auto start = s.find_first_not_of(" \t\r\n");
+	if (start == std::string::npos)
+		return "";
+	const auto end = s.find_last_not_of(" \t\r\n");
+	return s.substr(start, end - start + 1);
+}
+
+static std::vector<std::string> splitVersionParts(const std::string& s)
+{
+	std::vector<std::string> parts;
+	std::string current;
+	for (char c : s)
+	{
+		if (c == '.')
+		{
+			parts.push_back(current);
+			current.clear();
+		}
+		else
+		{
+			current.push_back(c);
+		}
+	}
+	parts.push_back(current);
+	return parts;
+}
+
+bool versionSatisfies(const std::string& version, const std::string& constraint)
+{
+	std::string c = trimCopy(constraint);
+	if (c.empty() || c == "*" || c == "x" || c == "X")
+		return true;
+
+	std::string v = trimCopy(version);
+	if (v.empty())
+		return false;
+
+	auto cparts = splitVersionParts(c);
+	auto vparts = splitVersionParts(v);
+
+	if (cparts.size() != vparts.size())
+		return false;
+
+	for (size_t i = 0; i < cparts.size(); i++)
+	{
+		const auto& cs = cparts[i];
+		const auto& vs = vparts[i];
+		if (cs == "x" || cs == "X" || cs == "*")
+			continue;
+		if (cs != vs)
+			return false;
+	}
+
+	return true;
 }

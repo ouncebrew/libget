@@ -6,6 +6,7 @@
 #include "rapidjson/rapidjson.h"
 #include <optional>
 #include <string>
+#include <vector>
 #if defined(SWITCH) || defined(WII)
 #define ROOT_PATH "/"
 #elif defined(__WIIU__)
@@ -28,6 +29,12 @@ class GetRepo;
 class LocalRepo;
 class OSCRepo;
 class UniStoreRepo;
+
+struct PackageDependency
+{
+	std::string name;
+	std::string version; // version constraint (empty or "*" means any)
+};
 
 /**
  * A package is a single application that can be installed. It contains the URL to the zip file and any instructions to install it (like a GET manifest).
@@ -148,6 +155,10 @@ public:
 		return binary;
 	}
 
+	[[nodiscard]] const std::vector<PackageDependency>& getDependencies() const {
+		return dependencies;
+	}
+
 	// these are exposed, since they can be overridden in some contexts
 	std::string title;
 	std::string author;
@@ -178,6 +189,8 @@ private:
 	int screens = 0;
 
 	std::string category;
+
+	std::vector<PackageDependency> dependencies;
 
 	// Sorting attributes
 	std::shared_ptr<Repo> mRepo;

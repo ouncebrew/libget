@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <memory>
 
 void info(const char* format, ...);
 
@@ -27,6 +28,7 @@ public:
 	std::vector<Package> search(const std::string& query); // return a list of packages matching query
 	std::vector<Package> list();							// return a list of all packages
 	std::optional<Package> lookup(const std::string& pkg_name);
+	std::shared_ptr<Package> findPackage(const std::string& pkg_name);
 	void addLocalRepo();
 	void removeDuplicates();
 	void update();
@@ -67,6 +69,15 @@ public:
 	void resetCancellation() { cancelRequested = false; }
 	
 private:
+	bool resolveDependencies(
+		const std::string& pkg_name,
+		std::vector<std::string>& order,
+		std::unordered_set<std::string>& visiting,
+		std::unordered_set<std::string>& visited,
+		std::string& error
+	);
+	int installSingle(Package& package, bool resume = false);
+
 	// the remote repos and packages
 	std::vector<std::shared_ptr<Repo>> repos;
 	std::vector<std::shared_ptr<Package>> packages;

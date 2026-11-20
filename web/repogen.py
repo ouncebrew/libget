@@ -132,6 +132,22 @@ for package in os.listdir("packages"):
             else:
                 target[val] = "n/a"
 
+        deps = props.get("depends", props.get("dependencies"))
+        if isinstance(deps, dict):
+            dep_map = {}
+            for k, v in deps.items():
+                if k:
+                    dep_map[str(k)] = "*" if v is None else str(v)
+            if dep_map:
+                target["depends"] = dep_map
+        elif isinstance(deps, list):
+            dep_map = {}
+            for d in deps:
+                if isinstance(d, (str, int, float)) and str(d):
+                    dep_map[str(d)] = "*"
+            if dep_map:
+                target["depends"] = dep_map
+
     if needsCaching:    # no deletetoupdate loaded, we need to make one
         del_to_update = open(".deletetoupdate", 'w')
         json.dump(cached_info, del_to_update, sort_keys=True, indent=4, separators=(',', ': '))

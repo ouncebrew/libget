@@ -91,4 +91,5 @@ std::string dir_name(const std::string& file_path);
 bool compareLen(const std::string& a, const std::string& b);
 bool is_dir(std::string_view path, struct dirent* ent);
 std::string getHumanReadableBytes(uint64_t bytes);
+bool versionSatisfies(const std::string& version, const std::string& constraint);
 #endif
