@@ -150,17 +150,46 @@ char* my_strptime(const char* s,
 	const char* f,
 	struct tm* tm)
 {
-	// just use normal strptime, the DIY implementation was being Weird
-	return strptime(s, f, tm);
+	if (!s || !f || !tm)
+		return nullptr;
 
-	// std::istringstream input(s);
-	// input.imbue(std::locale(setlocale(LC_ALL, nullptr)));
-	// input >> std::get_time(tm, f);
-	// if (input.fail())
-	// {
-	// 	return nullptr;
-	// }
-	// return (char*)(s + input.tellg());
+	// Common format used by libget repos: DD/MM/YYYY
+	if (strcmp(f, "%d/%m/%Y") == 0)
+	{
+		int d = 0, m = 0, y = 0;
+		if (sscanf(s, "%d/%d/%d", &d, &m, &y) == 3)
+		{
+			tm->tm_mday = d;
+			tm->tm_mon = m - 1;
+			tm->tm_year = y - 1900;
+			tm->tm_hour = 0;
+			tm->tm_min = 0;
+			tm->tm_sec = 0;
+			tm->tm_isdst = -1;
+			return (char*)(s + strlen(s));
+		}
+		return nullptr;
+	}
+
+	// Fallback: try ISO-like YYYY-MM-DD if encountered
+	if (strcmp(f, "%Y-%m-%d") == 0)
+	{
+		int y = 0, m = 0, d = 0;
+		if (sscanf(s, "%d-%d-%d", &y, &m, &d) == 3)
+		{
+			tm->tm_mday = d;
+			tm->tm_mon = m - 1;
+			tm->tm_year = y - 1900;
+			tm->tm_hour = 0;
+			tm->tm_min = 0;
+			tm->tm_sec = 0;
+			tm->tm_isdst = -1;
+			return (char*)(s + strlen(s));
+		}
+		return nullptr;
+	}
+
+	return nullptr;
 }
 
 // http://stackoverflow.com/a/11366985
