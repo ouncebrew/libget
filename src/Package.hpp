@@ -7,11 +7,13 @@
 #include <optional>
 #include <string>
 #include <vector>
-#if defined(SWITCH) || defined(WII)
+#if defined(SWITCH) || defined(__SWITCH__) || defined(__SWITCH2__)
+#define ROOT_PATH "sdmc:/"
+#elif defined(WII)
 #define ROOT_PATH "/"
 #elif defined(__WIIU__)
 #define ROOT_PATH "fs:/vol/external01/"
-#elif defined(_3DS)
+#elif defined(_3DS) || defined(__3DS__)
 #define ROOT_PATH "sdmc:/"
 #else
 #define ROOT_PATH "sdroot/"

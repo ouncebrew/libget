@@ -195,32 +195,61 @@ char* my_strptime(const char* s,
 // http://stackoverflow.com/a/11366985
 bool mkpath(const std::string& path)
 {
-	bool bSuccess = false;
-	int nRC = my_mkdir(path, 0775);
-	if (nRC == -1)
+	if (path.empty())
+		return false;
+
+	std::string p = path;
+	// Trim trailing slashes (but keep root "/" or "sdmc:/")
+	while (p.size() > 1 && p.back() == '/')
 	{
-		switch (errno)
-		{
-		case ENOENT:
-			// parent didn't exist, try to create it
-			if (mkpath(path.substr(0, path.find_last_of('/'))))
-				// Now, try to create again.
-				bSuccess = 0 == my_mkdir(path, 0775);
-			else
-				bSuccess = false;
+		// Keep "X:/" style roots
+		if (p.size() >= 2 && p[p.size() - 2] == ':')
 			break;
-		case EEXIST:
-			// Done!
-			bSuccess = true;
-			break;
-		default:
-			bSuccess = false;
-			break;
-		}
+		p.pop_back();
 	}
-	else
-		bSuccess = true;
-	return bSuccess;
+
+	if (p.empty() || p == "/" || p == ".")
+		return true;
+	// Drive/root like "sdmc:/" or "sdmc:"
+	if (p.size() >= 2 && p.back() == ':' )
+		return true;
+	if (p.size() >= 3 && p[p.size() - 2] == ':' && p.back() == '/')
+		return true;
+
+	int nRC = my_mkdir(p, 0775);
+	if (nRC == 0)
+		return true;
+
+	if (errno == EEXIST)
+		return true;
+
+	if (errno != ENOENT)
+		return false;
+
+	size_t pos = p.find_last_of('/');
+	if (pos == std::string::npos)
+		return false;
+
+	std::string parent = p.substr(0, pos);
+	if (parent.empty())
+	{
+		// Parent of "/foo" is root "/"
+		parent = "/";
+	}
+	else if (parent.size() >= 2 && parent.back() == ':')
+	{
+		// "sdmc:" -> "sdmc:/"
+		parent += "/";
+	}
+
+	if (parent == p)
+		return false;
+
+	if (!mkpath(parent))
+		return false;
+
+	nRC = my_mkdir(p, 0775);
+	return (nRC == 0 || errno == EEXIST);
 }
 
 #ifndef NETWORK_MOCK
