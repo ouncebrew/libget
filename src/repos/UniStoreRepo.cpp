@@ -176,7 +176,7 @@ std::vector<std::unique_ptr<Package>> UniStoreRepo::loadPackages()
 						if (obj.HasMember("size") && obj["size"].IsInt()) {
 							package->download_size = obj["size"].GetInt();
 						}
-						if (name.ends_with(ending)) {
+						if (name.size() >= ending.size() && name.compare(name.size() - ending.size(), ending.size(), ending) == 0) {
 							package->url = url;
 							found = true;
 							break;

@@ -107,7 +107,7 @@ std::string Package::getUrlFileExt() const {
 
 	auto zipUrl = this->mRepo->getZipUrl(*this);
 
-	if (!zipUrl.ends_with(".zip")) { // only do something if it's not a .zip already
+	if (zipUrl.size() < 4 || zipUrl.compare(zipUrl.size() - 4, 4, ".zip") != 0) { // only do something if it's not a .zip already
 		auto lastDotPos = zipUrl.find_last_of(".");
 		if (lastDotPos != std::string::npos) {
 			// slash found, grab the file ending
