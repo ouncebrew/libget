@@ -156,7 +156,11 @@ UnZip::~UnZip()
 
 void UnZip::Close()
 {
-	unzClose(fileToUnzip);
+	if (fileToUnzip)
+	{
+		unzClose(fileToUnzip);
+		fileToUnzip = nullptr;
+	}
 }
 
 bool UnZip::IsValid()
@@ -411,8 +415,14 @@ std::string UnZip::GetFileName(const unz_file_info_s& fileInfo)
 std::string UnZip::GetFullFileName(const unz_file_info_s& fileInfo)
 {
 	std::string path;
-	path.resize(fileInfo.size_filename);
-	unzGetCurrentFileInfo(fileToUnzip, (unz_file_info_s*)&fileInfo, path.data(), path.size(), nullptr, 0, nullptr, 0);
+	path.resize(fileInfo.size_filename + 1, '\0');
+	unzGetCurrentFileInfo(fileToUnzip, (unz_file_info_s*)&fileInfo, &path[0], fileInfo.size_filename + 1, nullptr, 0, nullptr, 0);
+	// Trim at first null and any trailing whitespace
+	size_t end = path.find('\0');
+	if (end != std::string::npos)
+		path.resize(end);
+	while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
+		path.pop_back();
 	return path;
 }
 
