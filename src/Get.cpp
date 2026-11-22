@@ -239,17 +239,12 @@ void Get::addAndRemoveReposByURL(
 		auto url = entry.first;
 		auto curType = entry.second;
 		if (currentUrls.find(url) == currentUrls.end()) {
-			// extract domain from url string
+			// extract a display name from the url, preserving path for subpath repos
 			std::string nameSummary;
 			size_t start = url.find("//");
-
-			if (start != std::string::npos) {
-				nameSummary = url.substr(start + 2);
-				size_t end = nameSummary.find("/");
-				if (end != std::string::npos) {
-					nameSummary = nameSummary.substr(0, end);
-				}
-			}
+			nameSummary = (start != std::string::npos) ? url.substr(start + 2) : url;
+			while (!nameSummary.empty() && nameSummary.back() == '/')
+				nameSummary.pop_back();
 
 			// if nameSummary is still empty, provide a fallback
 			if (nameSummary.empty()) {

@@ -257,6 +257,8 @@ void setPlatformCurlFlags(CURL* c)
 {
 	// // from https://github.com/GaryOderNichts/wiiu-examples/blob/main/curl-https/romfs/cacert.pem
 	curl_easy_setopt(c, CURLOPT_CAINFO, RAMFS "res/cacert.pem");
+	curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+	curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
 
 	curl_easy_setopt(c, CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
 
