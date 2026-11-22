@@ -255,9 +255,12 @@ bool mkpath(const std::string& path)
 #ifndef NETWORK_MOCK
 void setPlatformCurlFlags(CURL* c)
 {
+	#ifndef __SWITCH__
 	// // from https://github.com/GaryOderNichts/wiiu-examples/blob/main/curl-https/romfs/cacert.pem
 	curl_easy_setopt(c, CURLOPT_CAINFO, RAMFS "res/cacert.pem");
-
+	#else
+	curl_easy_setopt(c, CURLOPT_CAINFO, "romfs:/util/cacert.pem");
+	#endif
 	curl_easy_setopt(c, CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
 
 	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); // follow redirects
