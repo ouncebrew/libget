@@ -30,6 +30,7 @@ public:
 	[[nodiscard]] bool isLoaded() const; // whether this server could be reached or not
 
 	void setEnabled(bool enabled);
+	void setName(const std::string& name);
 
 protected:
 

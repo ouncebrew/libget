@@ -99,6 +99,11 @@ void Repo::setEnabled(bool enabled_)
 	this->enabled = enabled_;
 }
 
+void Repo::setName(const std::string& name_)
+{
+	this->name = name_;
+}
+
 bool Repo::isLoaded() const
 {
 	return this->loaded;
