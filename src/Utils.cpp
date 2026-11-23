@@ -171,6 +171,24 @@ char* my_strptime(const char* s,
 		return nullptr;
 	}
 
+	// Datetime format used by hpak repos: DD/MM/YYYY HH:MM (24hr)
+	if (strcmp(f, "%d/%m/%Y %H:%M") == 0)
+	{
+		int d = 0, m = 0, y = 0, hh = 0, mm = 0;
+		if (sscanf(s, "%d/%d/%d %d:%d", &d, &m, &y, &hh, &mm) == 5)
+		{
+			tm->tm_mday = d;
+			tm->tm_mon = m - 1;
+			tm->tm_year = y - 1900;
+			tm->tm_hour = hh;
+			tm->tm_min = mm;
+			tm->tm_sec = 0;
+			tm->tm_isdst = -1;
+			return (char*)(s + strlen(s));
+		}
+		return nullptr;
+	}
+
 	// Fallback: try ISO-like YYYY-MM-DD if encountered
 	if (strcmp(f, "%Y-%m-%d") == 0)
 	{

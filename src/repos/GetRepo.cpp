@@ -142,6 +142,23 @@ std::vector<std::unique_ptr<Package>> GetRepo::loadPackages()
 				package->updated = ss.str();
 			}
 		}
+		// hpak datetime field: "DD/MM/YYYY HH:MM" (24hr). Overrides "updated" when present.
+		if (cur.HasMember("UpdateDateTime") && cur["UpdateDateTime"].IsString())
+		{
+			std::string dt = cur["UpdateDateTime"].GetString();
+			struct tm tm {};
+
+			auto res = my_strptime(dt.c_str(), "%d/%m/%Y %H:%M", &tm);
+			if (res)
+			{
+				tm.tm_sec = 0;
+				package->updated_timestamp = (int)mktime(&tm);
+
+				std::stringstream ss;
+				ss << std::put_time(&tm, "%Y-%m-%d %H:%M");
+				package->updated = ss.str();
+			}
+		}
 
 		// even more details
 		if (cur.HasMember("app_dls"))
