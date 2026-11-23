@@ -169,6 +169,8 @@ public:
 
 
 	std::string url;
+	std::string file; // direct download filename (e.g. dusklight.nro)
+	std::string directUrl; // direct download base URL
 private:
 	// Package attributes
 	std::string pkg_name;
