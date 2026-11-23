@@ -872,29 +872,105 @@ static std::vector<std::string> splitVersionParts(const std::string& s)
 	return parts;
 }
 
+bool parseNumericVersion(const std::string& in, int outSegments[4], int& outCount)
+{
+	outSegments[0] = outSegments[1] = outSegments[2] = outSegments[3] = 0;
+	outCount = 0;
+
+	size_t pos = 0;
+	while (pos < in.size() && (in[pos] == ' ' || in[pos] == '\t' || in[pos] == '\r' || in[pos] == '\n'))
+		pos++;
+	if (pos < in.size() && (in[pos] == 'v' || in[pos] == 'V'))
+		pos++;
+
+	int count = 0;
+	while (pos <= in.size() && count < 5)
+	{
+		// read leading digit run of this segment
+		size_t start = pos;
+		while (pos < in.size() && in[pos] >= '0' && in[pos] <= '9')
+			pos++;
+		if (pos == start)
+			break; // no digits: end of version core (suffix or invalid)
+		if (pos - start > 9)
+			return false; // absurdly large segment
+		if (count >= 4)
+			return false; // more than 4 numeric segments
+		outSegments[count++] = std::atoi(in.substr(start, pos - start).c_str());
+		if (pos >= in.size() || in[pos] != '.')
+			break;
+		pos++; // skip '.'
+	}
+
+	if (count < 1 || count > 4)
+		return false;
+	outCount = count;
+	return true;
+}
+
+int compareVersions(const std::string& a, const std::string& b)
+{
+	int aseg[4], bseg[4], acount, bcount;
+	if (parseNumericVersion(a, aseg, acount) && parseNumericVersion(b, bseg, bcount))
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			if (aseg[i] != bseg[i])
+				return (aseg[i] > bseg[i]) ? 1 : -1;
+		}
+		return 0;
+	}
+	// Non-numeric versions (e.g. tags): equal strings mean up to date,
+	// anything else is treated as newer (preserves legacy update behavior).
+	return (a == b) ? 0 : 1;
+}
+
+bool versionsEqual(const std::string& a, const std::string& b)
+{
+	return compareVersions(a, b) == 0;
+}
+
 bool versionSatisfies(const std::string& version, const std::string& constraint)
 {
 	std::string c = trimCopy(constraint);
 	if (c.empty() || c == "*" || c == "x" || c == "X")
 		return true;
 
-	std::string v = trimCopy(version);
-	if (v.empty())
-		return false;
-
+	// Constraint: 1-4 segments, each numeric or a wildcard.
 	auto cparts = splitVersionParts(c);
-	auto vparts = splitVersionParts(v);
-
-	if (cparts.size() != vparts.size())
+	if (cparts.empty() || cparts.size() > 4)
 		return false;
-
+	struct ConstraintSeg { bool wildcard; int value; };
+	ConstraintSeg cspec[4];
 	for (size_t i = 0; i < cparts.size(); i++)
 	{
-		const auto& cs = cparts[i];
-		const auto& vs = vparts[i];
-		if (cs == "x" || cs == "X" || cs == "*")
+		std::string s = trimCopy(cparts[i]);
+		if (s == "x" || s == "X" || s == "*")
+		{
+			cspec[i] = {true, 0};
 			continue;
-		if (cs != vs)
+		}
+		if (s.empty())
+			return false;
+		for (char ch : s)
+			if (ch < '0' || ch > '9')
+				return false;
+		if (s.size() > 9)
+			return false;
+		cspec[i] = {false, std::atoi(s.c_str())};
+	}
+
+	int vseg[4], vcount;
+	if (!parseNumericVersion(version, vseg, vcount))
+		return false;
+
+	// Compare only the segments the constraint specifies (prefix semantics,
+	// so "1.0" accepts "1.0.x"); missing version segments count as 0.
+	for (size_t i = 0; i < cparts.size(); i++)
+	{
+		if (cspec[i].wildcard)
+			continue;
+		if (cspec[i].value != vseg[i])
 			return false;
 	}
 

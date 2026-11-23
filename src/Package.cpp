@@ -640,7 +640,9 @@ void Package::updateStatus(const std::string& pkg_path)
 		else
 			tmpVersion = "0.0.0";
 
-		if (tmpVersion != this->version)
+		// Only a strictly newer repo version is an update; an older repo
+		// version means the install is ahead (no downgrade offered).
+		if (compareVersions(tmpVersion, this->version) > 0)
 			this->status = UPDATE;
 
 		// we're eithe ran update or an install at this point

@@ -92,4 +92,13 @@ bool compareLen(const std::string& a, const std::string& b);
 bool is_dir(std::string_view path, struct dirent* ent);
 std::string getHumanReadableBytes(uint64_t bytes);
 bool versionSatisfies(const std::string& version, const std::string& constraint);
+// Parse "x[.x[.x[.x]]]" (optional leading 'v', trailing suffix ignored).
+// Fills outSegments (zero-padded to 4) and outCount (1-4). Returns false if invalid.
+bool parseNumericVersion(const std::string& in, int outSegments[4], int& outCount);
+// Ordinal comparison: >0 if a is newer, 0 if equal, <0 if a is older.
+// Non-numeric versions compare by exact string equality (equal, else a is "newer").
+int compareVersions(const std::string& a, const std::string& b);
+// Numeric equality with zero-padding ("1.0" == "1.0.0"); falls back to
+// exact string match when either side isn't a numeric version.
+bool versionsEqual(const std::string& a, const std::string& b);
 #endif

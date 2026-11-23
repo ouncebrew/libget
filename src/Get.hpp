@@ -67,8 +67,6 @@ public:
 	void cancelCurrentOperation() { cancelRequested = true; }
 	bool isCancelled() const { return cancelRequested; }
 	void resetCancellation() { cancelRequested = false; }
-	
-private:
 	bool resolveDependencies(
 		const std::string& pkg_name,
 		std::vector<std::string>& order,
@@ -77,6 +75,8 @@ private:
 		std::string& error
 	);
 	int installSingle(Package& package, bool resume = false);
+
+private:
 
 	// the remote repos and packages
 	std::vector<std::shared_ptr<Repo>> repos;
