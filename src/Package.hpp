@@ -161,6 +161,10 @@ public:
 		return dependencies;
 	}
 
+	[[nodiscard]] std::shared_ptr<Repo> getRepo() const {
+		return mRepo;
+	}
+
 	// these are exposed, since they can be overridden in some contexts
 	std::string title;
 	std::string author;
