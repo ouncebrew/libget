@@ -122,6 +122,8 @@ std::vector<std::unique_ptr<Package>> GetRepo::loadPackages()
 			package->directUrl = cur["direct_url"].GetString();
 		else if (!package->file.empty())
 			package->directUrl = package->url;
+		if (cur.HasMember("path") && cur["path"].IsString())
+			package->path = cur["path"].GetString();
 		if (cur.HasMember("updated"))
 		{
 			package->updated = cur["updated"].GetString();

@@ -175,6 +175,7 @@ public:
 	std::string url;
 	std::string file; // direct download filename (e.g. dusklight.nro)
 	std::string directUrl; // direct download base URL
+	std::string path; // install path for non-zip direct downloads (e.g. sdmc:/switch/)
 private:
 	// Package attributes
 	std::string pkg_name;
