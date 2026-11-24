@@ -124,6 +124,18 @@ std::vector<std::unique_ptr<Package>> GetRepo::loadPackages()
 			package->directUrl = package->url;
 		if (cur.HasMember("path") && cur["path"].IsString())
 			package->path = cur["path"].GetString();
+		if (cur.HasMember("requiredDeletion") && cur["requiredDeletion"].IsArray())
+		{
+			for (auto& v : cur["requiredDeletion"].GetArray())
+				if (v.IsString())
+					package->requiredDeletion.push_back(v.GetString());
+		}
+		if (cur.HasMember("userDeletion") && cur["userDeletion"].IsArray())
+		{
+			for (auto& v : cur["userDeletion"].GetArray())
+				if (v.IsString())
+					package->userDeletion.push_back(v.GetString());
+		}
 		if (cur.HasMember("updated"))
 		{
 			package->updated = cur["updated"].GetString();

@@ -161,6 +161,14 @@ public:
 		return dependencies;
 	}
 
+	[[nodiscard]] const std::vector<std::string>& getRequiredDeletion() const {
+		return requiredDeletion;
+	}
+
+	[[nodiscard]] const std::vector<std::string>& getUserDeletion() const {
+		return userDeletion;
+	}
+
 	[[nodiscard]] std::shared_ptr<Repo> getRepo() const {
 		return mRepo;
 	}
@@ -176,6 +184,8 @@ public:
 	std::string file; // direct download filename (e.g. dusklight.nro)
 	std::string directUrl; // direct download base URL
 	std::string path; // install path for non-zip direct downloads (e.g. sdmc:/switch/)
+	std::vector<std::string> requiredDeletion; // paths always removed on uninstall (sdmc:/...)
+	std::vector<std::string> userDeletion; // user data paths, removed only with consent
 private:
 	// Package attributes
 	std::string pkg_name;
