@@ -136,6 +136,80 @@ std::vector<std::unique_ptr<Package>> GetRepo::loadPackages()
 				if (v.IsString())
 					package->userDeletion.push_back(v.GetString());
 		}
+		// hpak direct-download packages: pull per-release metadata when the
+		// repo entry doesn't carry the full set (skipped otherwise to save
+		// rate limits). Keeps version/title/etc. current for status checks.
+		if (!package->file.empty())
+		{
+			bool hasFull = !package->title.empty() && !package->author.empty() &&
+			               !package->version.empty() && !package->short_desc.empty() &&
+			               !package->long_desc.empty() && !package->license.empty() &&
+			               !package->changelog.empty();
+			if (!hasFull)
+			{
+				std::string base = !package->directUrl.empty() ? package->directUrl : package->url;
+				while (!base.empty() && base.back() == '/') base.pop_back();
+				std::string content;
+				if (!base.empty() && downloadFileToMemory(base + "/package.json", &content))
+				{
+					Document pj;
+					if (!pj.Parse(content.c_str()).HasParseError() && pj.IsObject())
+					{
+						auto getStr = [&](const char* key) -> std::string {
+							auto it = pj.FindMember(key);
+							if (it != pj.MemberEnd() && it->value.IsString())
+								return it->value.GetString();
+							return "";
+						};
+						auto setIf = [&](std::string& field, const char* key) {
+							std::string v = getStr(key);
+							if (!v.empty()) field = v;
+						};
+						std::string t = getStr("title");
+						if (t.empty()) t = getStr("name");
+						if (!t.empty()) package->title = t;
+						setIf(package->author, "author");
+						setIf(package->version, "version");
+						setIf(package->short_desc, "description");
+						if (package->short_desc.empty()) setIf(package->short_desc, "short_desc");
+						setIf(package->long_desc, "details");
+						if (package->long_desc.empty()) setIf(package->long_desc, "long_desc");
+						setIf(package->license, "license");
+						setIf(package->changelog, "changelog");
+						if (pj.HasMember("requiredDeletion") && pj["requiredDeletion"].IsArray())
+						{
+							for (auto& v : pj["requiredDeletion"].GetArray())
+								if (v.IsString())
+									package->requiredDeletion.push_back(v.GetString());
+						}
+						if (pj.HasMember("userDeletion") && pj["userDeletion"].IsArray())
+						{
+							for (auto& v : pj["userDeletion"].GetArray())
+								if (v.IsString())
+									package->userDeletion.push_back(v.GetString());
+						}
+						if (pj.HasMember("dependencies") && pj["dependencies"].IsObject())
+						{
+							for (auto it = pj["dependencies"].MemberBegin(); it != pj["dependencies"].MemberEnd(); ++it)
+							{
+								if (!it->name.IsString())
+									continue;
+								std::string vc = "*";
+								if (it->value.IsString())
+									vc = it->value.GetString();
+								package->dependencies.push_back({it->name.GetString(), vc});
+							}
+						}
+						if (pj.HasMember("depends") && pj["depends"].IsArray())
+						{
+							for (auto& v : pj["depends"].GetArray())
+								if (v.IsString())
+									package->dependencies.push_back({v.GetString(), "*"});
+						}
+					}
+				}
+			}
+		}
 		if (cur.HasMember("updated"))
 		{
 			package->updated = cur["updated"].GetString();
