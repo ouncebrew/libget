@@ -271,14 +271,28 @@ bool mkpath(const std::string& path)
 }
 
 #ifndef NETWORK_MOCK
+std::string tlsCaBundlePath()
+{
+#ifdef __SWITCH__
+	static const char* candidates[] = {
+		"sdmc:/kaihen/lib/cacert.pem",
+		"sdmc:/lib/cacert.pem",
+	};
+	for (auto path : candidates) {
+		struct stat st{};
+		if (stat(path, &st) == 0 && st.st_size > 0)
+			return path;
+	}
+	return "romfs:/util/cacert.pem";
+#else
+	// from https://github.com/GaryOderNichts/wiiu-examples/blob/main/curl-https/romfs/cacert.pem
+	return RAMFS "res/cacert.pem";
+#endif
+}
+
 void setPlatformCurlFlags(CURL* c)
 {
-	#ifndef __SWITCH__
-	// // from https://github.com/GaryOderNichts/wiiu-examples/blob/main/curl-https/romfs/cacert.pem
-	curl_easy_setopt(c, CURLOPT_CAINFO, RAMFS "res/cacert.pem");
-	#else
-	curl_easy_setopt(c, CURLOPT_CAINFO, "romfs:/util/cacert.pem");
-	#endif
+	curl_easy_setopt(c, CURLOPT_CAINFO, tlsCaBundlePath().c_str());
 	curl_easy_setopt(c, CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
 
 	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); // follow redirects

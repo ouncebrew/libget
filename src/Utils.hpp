@@ -91,6 +91,9 @@ std::string dir_name(const std::string& file_path);
 bool compareLen(const std::string& a, const std::string& b);
 bool is_dir(std::string_view path, struct dirent* ent);
 std::string getHumanReadableBytes(uint64_t bytes);
+// CA bundle override: sdmc:/kaihen/lib/{cacert.pem,ca-bundle.crt,curl-ca-bundle.crt}
+// if present, else the embedded bundle.
+std::string tlsCaBundlePath();
 bool versionSatisfies(const std::string& version, const std::string& constraint);
 // Parse "x[.x[.x[.x]]]" (optional leading 'v', trailing suffix ignored).
 // Fills outSegments (zero-padded to 4) and outCount (1-4). Returns false if invalid.
