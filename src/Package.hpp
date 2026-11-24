@@ -184,6 +184,7 @@ public:
 	std::string file; // direct download filename (e.g. dusklight.nro)
 	std::string directUrl; // direct download base URL
 	std::string path; // install path for non-zip direct downloads (e.g. sdmc:/switch/)
+	std::string sha256; // SHA-256 of the direct download, 64 lowercase hex digits, or empty
 	std::vector<std::string> requiredDeletion; // paths always removed on uninstall (sdmc:/...)
 	std::vector<std::string> userDeletion; // user data paths, removed only with consent
 private:

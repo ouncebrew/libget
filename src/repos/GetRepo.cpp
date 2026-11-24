@@ -124,6 +124,8 @@ std::vector<std::unique_ptr<Package>> GetRepo::loadPackages()
 			package->directUrl = package->url;
 		if (cur.HasMember("path") && cur["path"].IsString())
 			package->path = cur["path"].GetString();
+		if (cur.HasMember("sha256") && cur["sha256"].IsString())
+			package->sha256 = cur["sha256"].GetString();
 		if (cur.HasMember("requiredDeletion") && cur["requiredDeletion"].IsArray())
 		{
 			for (auto& v : cur["requiredDeletion"].GetArray())
