@@ -25,9 +25,10 @@ class InitCheck : public Test {
 
     cout << "Checking repo count..." << endl;
 
+	auto repos = get->getRepos();
     for (int x=0; x<3; x++) {
-        if (get->repos[x]->enabled == (x != 0)) {
-	       error << "Repo [" << get->repos[x]->name << "] should've been " << (x == 0) << ", but was " << get->repos[x]->enabled << endl;
+        if (repos[x]->isEnabled() == (x != 0)) {
+	       error << "Repo [" << repos[x]->getName() << "] should've been " << (x == 0) << ", but was " << repos[x]->isEnabled() << endl;
 	       return false;
         }
     }

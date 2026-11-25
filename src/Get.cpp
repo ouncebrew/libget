@@ -1,10 +1,10 @@
 #include <algorithm>
+#include <cstdarg>
 #include <fstream>
 #include <iostream>
-#include <unordered_set>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <cstdarg>
+#include <unordered_set>
 
 #include "rapidjson/document.h"
 #include "rapidjson/istreamwrapper.h"
@@ -12,78 +12,288 @@
 #include "rapidjson/writer.h"
 
 #include "Get.hpp"
+#include "./repos/GetRepo.hpp"
+#include "./repos/LocalRepo.hpp"
 #include "Utils.hpp"
 
-using namespace std;
 using namespace rapidjson;
 
 bool debug = false;
 
-Get::Get(const char* config_dir, const char* defaultRepo)
+Get::Get(
+	std::string_view config_dir,
+	std::string_view defaultRepo,
+	bool performInitialLoad,
+	std::string defaultRepoType
+)
+	: mDefaultRepo(defaultRepo), mDefaultRepoType(defaultRepoType)
 {
-	this->defaultRepo = defaultRepo;
 
 	// the path for the get metadata folder
-	string config_path = config_dir;
+	std::string config_path = std::string(config_dir);
 
-	string* repo_file = new string(config_path + "repos.json");
-	this->repos_path = repo_file->c_str();
-	string* package_dir = new string(config_path + "packages/");
-	this->pkg_path = package_dir->c_str();
-	string* tmp_dir = new string(config_path + "tmp/");
-	this->tmp_path = tmp_dir->c_str();
+	mRepos_path = std::string(config_path + "repos.json");
+	mPkg_path = std::string(config_path + "packages/");
+	mTmp_path = std::string(config_path + "tmp/");
 
 	//	  printf("--> Using \"./sdroot\" as local download root directory\n");
-	//	  mkdir("./sdroot", 0700);
+	//	  my_mkdir("./sdroot");
 
-	mkdir(config_path.c_str(), 0700);
-	mkdir(package_dir->c_str(), 0700);
-	mkdir(tmp_dir->c_str(), 0700);
+	my_mkdir(config_dir.data());
+	my_mkdir(mPkg_path.c_str());
+	my_mkdir(mTmp_path.c_str());
 
-	printf("--> Using \"%s\" as repo list\n", repo_file->c_str());
+	printf("--> Using \"%s\" as repo list\n", mRepos_path.c_str());
 
-	// load repo info
 	this->loadRepos();
-	this->update();
+
+	if (performInitialLoad) {
+		// load repo info
+		this->update();
+	}
 }
 
-int Get::install(Package* package)
+std::shared_ptr<Package> Get::findPackage(const std::string& pkg_name)
+{
+	for (auto& cur : packages)
+	{
+		if (cur && cur->getPackageName() == pkg_name)
+			return cur;
+	}
+	return nullptr;
+}
+
+bool Get::resolveDependencies(
+	const std::string& pkg_name,
+	std::vector<std::string>& order,
+	std::unordered_set<std::string>& visiting,
+	std::unordered_set<std::string>& visited,
+	std::string& error)
+{
+	if (visited.find(pkg_name) != visited.end())
+		return true;
+	if (visiting.find(pkg_name) != visiting.end())
+	{
+		error = "Dependency cycle detected involving package '" + pkg_name + "'";
+		return false;
+	}
+
+	auto pkg = findPackage(pkg_name);
+	if (!pkg)
+	{
+		error = "Package '" + pkg_name + "' not found in enabled repos";
+		return false;
+	}
+
+	visiting.insert(pkg_name);
+	for (const auto& dep : pkg->getDependencies())
+	{
+		if (dep.name.empty())
+			continue;
+		auto depPkg = findPackage(dep.name);
+		if (!depPkg)
+		{
+			error = "Package '" + pkg_name + "' depends on missing package '" + dep.name + "'";
+			return false;
+		}
+		if (!versionSatisfies(depPkg->getVersion(), dep.version))
+		{
+			error = "Package '" + pkg_name + "' requires dependency '" + dep.name + "' with version constraint '" + dep.version + "', but available version is '" + depPkg->getVersion() + "'";
+			return false;
+		}
+		if (!resolveDependencies(dep.name, order, visiting, visited, error))
+			return false;
+	}
+	visiting.erase(pkg_name);
+	visited.insert(pkg_name);
+	order.push_back(pkg_name);
+	return true;
+}
+
+int Get::installSingle(Package& package, bool resume)
 {
 	// found package in a remote server, fetch it
-	bool located = package->downloadZip(this->tmp_path);
+	bool located = package.downloadZip(mTmp_path, nullptr, resume);
 
 	if (!located)
 	{
 		// according to the repo list, the package zip file should've been here
 		// but we got a 404 and couldn't find it
-		printf("--> Error retrieving remote file for [%s] (check network or 404 error?)\n", package->pkg_name.c_str());
+		printf("--> Error retrieving remote file for [%s] (check network or 404 error?)\n", package.getPackageName().c_str());
 		return false;
 	}
 
 	// install the package, (extracts manifest, etc)
-	package->install(this->pkg_path, this->tmp_path);
+	if (!package.install(mPkg_path, mTmp_path))
+	{
+		printf("--> Error installing [%s]\n", package.getPackageName().c_str());
+		return false;
+	}
 
-	printf("--> Downloaded [%s] to sdroot/\n", package->pkg_name.c_str());
+	printf("--> Downloaded [%s] to sdroot/\n", package.getPackageName().c_str());
+
+	// clear any progress callbacks before updating repo metadata
+	extern libget_progress_callback_t networking_callback;
+	extern void* networking_callback_data;
+	networking_callback = nullptr;
+	networking_callback_data = nullptr;
 
 	// update again post-install
 	update();
 	return true;
 }
 
-int Get::remove(Package* package)
+int Get::install(Package& package, bool resume)
 {
-	package->remove(this->pkg_path);
-	printf("--> Uninstalled [%s] package\n", package->pkg_name.c_str());
+	std::vector<std::string> order;
+	std::unordered_set<std::string> visiting;
+	std::unordered_set<std::string> visited;
+	std::string error;
+	std::string rootName = package.getPackageName();
+
+	if (!resolveDependencies(rootName, order, visiting, visited, error))
+	{
+		printf("--> %s\n", error.c_str());
+		return false;
+	}
+
+	for (const auto& name : order)
+	{
+		auto cur = findPackage(name);
+		if (!cur)
+		{
+			printf("--> Package '%s' not found in enabled repos\n", name.c_str());
+			return false;
+		}
+
+		bool isRoot = (name == rootName);
+		if (!isRoot)
+		{
+			int status = cur->getStatus();
+			if (status == INSTALLED || status == LOCAL)
+			{
+				printf("--> Dependency [%s] already satisfied (%s, version %s)\n", name.c_str(), cur->statusString(), cur->getVersion().c_str());
+				continue;
+			}
+			printf("--> Installing dependency [%s] (version %s)...\n", name.c_str(), cur->getVersion().c_str());
+		}
+
+		// only pass resume to the explicitly requested package
+		if (!installSingle(*cur, isRoot ? resume : false))
+			return false;
+	}
+
+	return true;
+}
+
+int Get::remove(Package& package)
+{
+	if (!package.remove(mPkg_path))
+	{
+		printf("--> Error removing [%s] package\n", package.getPackageName().c_str());
+		return false;
+	}
+	printf("--> Uninstalled [%s] package\n", package.getPackageName().c_str());
 	update();
 
 	return true;
 }
 
-int Get::toggleRepo(Repo* repo)
+int Get::toggleRepo(Repo& repo)
 {
-	repo->enabled = !repo->enabled;
+	repo.setEnabled(!repo.isEnabled());
 	update();
 	return true;
+}
+
+void Get::addLocalRepo()
+{
+	repos.push_back(std::make_unique<LocalRepo>(mPkg_path));
+	update();
+}
+
+void Get::addAndRemoveReposByURL(
+	const std::unordered_map<std::string, std::string>& reposToAdd,
+	const std::unordered_set<std::string>& reposToRemove
+)
+{
+	size_t reposLen = repos.size();
+
+	bool madeChanges = false;
+
+	repos.erase(std::remove_if(repos.begin(), repos.end(), 
+		[reposToRemove](auto curRepo) {
+			std::string curUrl = curRepo->getUrl();
+			return reposToRemove.find(curUrl) != reposToRemove.end();
+		}), repos.end()
+	);
+
+	madeChanges = reposLen != repos.size();
+
+	std::unordered_set<std::string> currentUrls;
+	for (auto& curRepo : repos) {
+		currentUrls.insert(curRepo->getUrl());
+	}
+	
+	for (auto& entry : reposToAdd) {
+		auto url = entry.first;
+		auto curType = entry.second;
+		if (currentUrls.find(url) == currentUrls.end()) {
+			// extract a display name from the url, preserving path for subpath repos
+			std::string nameSummary;
+			size_t start = url.find("//");
+			nameSummary = (start != std::string::npos) ? url.substr(start + 2) : url;
+			while (!nameSummary.empty() && nameSummary.back() == '/')
+				nameSummary.pop_back();
+
+			// if nameSummary is still empty, provide a fallback
+			if (nameSummary.empty()) {
+				nameSummary = "Auto-added from Meta";
+			}
+			auto newRepo = Repo::createRepo(nameSummary, url, true, curType, "");
+			repos.push_back(std::shared_ptr<Repo>(std::move(newRepo)));
+		}
+	}
+
+	madeChanges = madeChanges || reposLen != repos.size();
+
+	// save the repos to disk, if we've made any changes
+	if (madeChanges) {
+		saveRepos();
+		loadRepos();
+	}
+}
+
+// Saves the repos from our current Get object to disk
+void Get::saveRepos() {
+	Document d;
+	d.SetObject();
+	Document::AllocatorType& allocator = d.GetAllocator();
+
+	Value reposOut(kArrayType);
+
+	for (auto& repo : repos) {
+		Value repoObj(kObjectType);
+		printf("--> Saving repo %s\n", repo->getName().c_str());
+		printf("--> Saving repo %s\n", repo->getUrl().c_str());
+		printf("--> Saving repo %s\n", repo->getType().c_str());
+		
+		repoObj.AddMember("name", rapidjson::Value(repo->getName().c_str(), allocator), allocator);
+		repoObj.AddMember("url",  rapidjson::Value(repo->getUrl().c_str(), allocator), allocator);
+		repoObj.AddMember("type", rapidjson::Value(repo->getType().c_str(), allocator), allocator);
+		repoObj.AddMember("enabled", repo->isEnabled(), allocator);
+		reposOut.PushBack(repoObj, allocator);
+	}
+
+	d.AddMember("repos", reposOut, allocator);
+
+	std::ofstream file(mRepos_path);
+	StringBuffer buffer;
+	Writer<StringBuffer> writer(buffer);
+	d.Accept(writer);
+	std::cout << buffer.GetString() << std::endl;
+	file << buffer.GetString();
+	file.close();
 }
 
 /**
@@ -92,49 +302,50 @@ Load any repos from a config file into the repos vector.
 void Get::loadRepos()
 {
 	repos.clear();
-	const char* config_path = repos_path;
 
-	ifstream* ifs = new ifstream(config_path);
+	auto& config_path = mRepos_path;
+	std::ifstream ifs(config_path);
 
-	if (!ifs->good() || ifs->peek() == std::ifstream::traits_type::eof())
+	if (!ifs.good() || ifs.peek() == std::ifstream::traits_type::eof())
 	{
-		printf("--> Could not load repos from %s, generating default repos.json\n", config_path);
+		printf("--> Could not load repos from %s, generating default GET repos.json\n", config_path.c_str());
 
-		Repo* defaultRepo = new Repo("Default Repo", this->defaultRepo);
+#if defined(WII) || defined(_3DS) || defined(WII_MOCK)
+		auto defaultRepo = GetRepo::createRepo("Default Repo", this->mDefaultRepo, true, this->mDefaultRepoType, mPkg_path);
+#else
+		auto defaultRepo = std::make_unique<GetRepo>("Default Repo", this->mDefaultRepo, true);
+#endif
 
 		Document d;
-		d.Parse(generateRepoJson(1, defaultRepo).c_str());
+		d.Parse(Repo::generateRepoJson(*defaultRepo).c_str());
 
 		std::ofstream file(config_path);
 		StringBuffer buffer;
 		Writer<StringBuffer> writer(buffer);
 		d.Accept(writer);
 		file << buffer.GetString();
+		file.close();
 
-		ifs = new ifstream(config_path);
+		ifs = std::ifstream(config_path);
 
-		if (!ifs->good())
+		if (!ifs.good())
 		{
 			printf("--> Could not generate a new repos.json\n");
 
-			// manually create a repo, no file access
-			Repo* repo = new Repo();
-			repo->name = "4TU Switch Repo";
-			repo->url = this->defaultRepo;
-			repo->enabled = true;
-			repos.push_back(repo);
+			// manually create a repo, no file access (so we append now, since we won't be able to load later)
+			repos.push_back(std::move(defaultRepo));
 			return;
 		}
 	}
 
-	IStreamWrapper isw(*ifs);
+	IStreamWrapper isw(ifs);
 
 	Document doc;
 	ParseResult ok = doc.ParseStream(isw);
 
 	if (!ok || !doc.HasMember("repos"))
 	{
-		printf("--> Invalid format in %s", config_path);
+		printf("--> Invalid format in %s", config_path.c_str());
 		return;
 	}
 
@@ -143,49 +354,85 @@ void Get::loadRepos()
 	// for every repo
 	for (Value::ConstValueIterator it = repos_doc.Begin(); it != repos_doc.End(); it++)
 	{
-		Repo* repo = new Repo();
-		repo->name = (*it)["name"].GetString();
-		repo->url = (*it)["url"].GetString();
-		repo->enabled = (*it)["enabled"].GetBool();
-		repos.push_back(repo);
-	}
 
-	return;
+		auto repoName = "Default Repo";
+		auto repoUrl = "";
+		auto repoEnabled = false;
+		auto repoType = "get"; // carryover from before this was defined
+
+		if ((*it).HasMember("name"))
+			repoName = (*it)["name"].GetString();
+		if ((*it).HasMember("url"))
+			repoUrl = (*it)["url"].GetString();
+		if ((*it).HasMember("enabled"))
+			repoEnabled = (*it)["enabled"].GetBool();
+		if ((*it).HasMember("type"))
+			repoType = (*it)["type"].GetString();
+
+		printf("--> Found repo: %s, %s\n", repoName, repoType);
+
+		auto repo = Repo::createRepo(repoName, repoUrl, repoEnabled, repoType, mPkg_path);
+		if (repo)
+		{
+			repos.push_back(std::move(repo));
+		}
+	}
 }
 
 void Get::update()
 {
+	printf("--> Updating package list\n");
+	
 	// clear current packages
 	packages.clear();
 
 	// fetch recent package list from enabled repos
-	for (size_t x = 0; x < repos.size(); x++)
+	int i = 0;
+	for (const auto& repo : repos)
 	{
-		if (repos[x]->enabled)
+		printf("--> Checking repo %s\n", repo->getName().c_str());
+		if (repo->isLoaded() && repo->isEnabled())
 		{
-			if (libget_status_callback != NULL)
-				libget_status_callback(STATUS_RELOADING, x+1, repos.size());
+			printf("--> Repo %s is loaded and enabled\n", repo->getName().c_str());
+			if (libget_status_callback != nullptr)
+			{
+				libget_status_callback(STATUS_RELOADING, i + 1, (int32_t)repos.size());
+			}
 
-			repos[x]->loadPackages(&packages);
+			for (auto& element : repo->loadPackages())
+			{
+				element->mRepo = repo;
+				packages.push_back(std::move(element));
+			}
 		}
+		i++;
 	}
 
-	if (libget_status_callback != NULL)
+	if (libget_status_callback != nullptr)
+	{
 		libget_status_callback(STATUS_UPDATING_STATUS, 1, 1);
+	}
 
-  // remove duplicates, prioritizing later packages over earlier ones
-  this->removeDuplicates();
+	// remove duplicates, prioritizing later packages over earlier ones
+	this->removeDuplicates();
 
 	// check for any installed packages to update their status
-	for (size_t x = 0; x < packages.size(); x++)
-	{
-		packages[x]->updateStatus(this->pkg_path);
+	for (const auto& package : packages) {
+		package->updateStatus(mPkg_path);
 	}
+	
+	printf("--> Get::update() complete, final package count: %zu\n", packages.size());
+
+	// sort the packages by name
+	// TODO: apply other sort orders here, and potentially search filters
+	// std::sort(packages.begin(), packages.end(), [](const std::shared_ptr<Package>& a, const std::shared_ptr<Package>& b) {
+	// 	return a->getPackageName() < b->getPackageName();
+	// });
 }
 
-int Get::validateRepos()
+int Get::validateRepos() const
 {
-	if (repos.size() == 0)
+	if (repos.empty())
 	{
 		printf("--> There are no repos configured!\n");
 		return ERR_NO_REPOS;
@@ -194,21 +441,31 @@ int Get::validateRepos()
 	return 0;
 }
 
-std::vector<Package*> Get::search(std::string query)
+std::vector<Package> Get::list()
+{
+	// packages is a vector of shared_ptrs, so we need to dereference them
+	std::vector<Package> ret;
+	for (auto& cur : packages) {
+		if (cur != nullptr)
+			ret.emplace_back(*cur);
+	}
+	return ret;
+}
+
+std::vector<Package> Get::search(const std::string& query)
 {
 	// TODO: replace with inverted index for speed
 	// https://vgmoose.com/blog/implementing-a-static-blog-search-clientside-in-js-6629164446/
 
-	std::vector<Package*> results = std::vector<Package*>();
+	std::vector<Package> results;
 	std::string lower_query = toLower(query);
 
-	for (size_t x = 0; x < packages.size(); x++)
+	for (auto& cur : packages)
 	{
-		Package* cur = packages[x];
-		if (cur != NULL && (toLower(cur->title).find(lower_query) != std::string::npos || toLower(cur->author).find(lower_query) != std::string::npos || toLower(cur->short_desc).find(lower_query) != std::string::npos || toLower(cur->long_desc).find(lower_query) != std::string::npos))
+		if (cur != nullptr && (toLower(cur->getTitle()).find(lower_query) != std::string::npos || toLower(cur->getAuthor()).find(lower_query) != std::string::npos || toLower(cur->getShortDescription()).find(lower_query) != std::string::npos || toLower(cur->getLongDescription()).find(lower_query) != std::string::npos))
 		{
 			// matches, add to return vector, and continue
-			results.push_back(cur);
+			results.emplace_back(*cur); // add copy to result;
 			continue;
 		}
 	}
@@ -216,40 +473,40 @@ std::vector<Package*> Get::search(std::string query)
 	return results;
 }
 
-Package* Get::lookup(std::string pkg_name)
+std::optional<Package> Get::lookup(const std::string& pkg_name)
 {
-	for (size_t x = 0; x < packages.size(); x++)
+	for (auto& cur : packages)
 	{
-		Package* cur = packages[x];
-		if (cur != NULL && cur->pkg_name == pkg_name)
+		if (cur && cur->getPackageName() == pkg_name)
 		{
-			return cur;
+			// return copy!
+			return *cur;
 		}
 	}
-	return NULL;
+	return std::nullopt;
 }
 
 void Get::removeDuplicates()
 {
-  std::unordered_set<std::string> packageSet;
-  std::unordered_set<Package*> removalSet;
+	std::unordered_set<std::string> packageSet;
+	std::unordered_set<std::shared_ptr<Package>> removalSet;
 
-  // going backards, fill out our sets
-  // (prioritizes later repo packages over earlier ones, regardless of versioning)
-  // TODO: semantic versioning or have a versionCode int that increments every update
-  for (int x = packages.size()-1; x >= 0; x--)
-  {
-    std::string name = packages[x]->pkg_name;
-    if (packageSet.find(name) == packageSet.end())
-      packageSet.insert(name);
-    else
-      removalSet.insert(packages[x]);
-  }
+	// going backards, fill out our sets
+	// (prioritizes later repo packages over earlier ones, regardless of versioning)
+	// TODO: semantic versioning or have a versionCode int that increments every update
+	for (int32_t x = (int32_t)packages.size() - 1; x >= 0; x--)
+	{
+		auto& name = packages[x]->getPackageName();
+		if (packageSet.find(name) == packageSet.end())
+			packageSet.insert(name);
+		else
+			removalSet.insert(packages[x]);
+	}
 
-  // remove them, if they are in the removal set
-  packages.erase(std::remove_if(packages.begin(), packages.end(), [removalSet](Package* p) {
-    return removalSet.find(p) != removalSet.end();
-  }), packages.end());
+	// remove them, if they are in the removal set
+	packages.erase(std::remove_if(packages.begin(), packages.end(), [removalSet](auto& p)
+					   { return removalSet.find(p) != removalSet.end(); }),
+		packages.end());
 }
 
 void info(const char* format, ...)

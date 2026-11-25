@@ -1,6 +1,14 @@
 // operating system level utilities
 // contains directory utils, http utils, and helper methods
 
+// CURLOPT_PROGRESSFUNCTION deprecated in 7.32.0 and is replaced with CURLOPT_XFERINFOFUNCTION
+#include <curl/curl.h>
+#if LIBCURL_VERSION_NUM >= 0x072000
+	#define COMPAT_CURL_PROGRESS_OPTION CURLOPT_XFERINFOFUNCTION
+#else
+	#define COMPAT_CURL_PROGRESS_OPTION CURLOPT_PROGRESSFUNCTION
+#endif
+
 #if defined(WII) && !defined(NETWORK_MOCK)
 #include <wiisocket.h>
 #endif
@@ -14,21 +22,25 @@
 #include <malloc.h>
 #endif
 
-#include <algorithm>
-#include <cstdint>
+#if defined(WIN32)
+#include <sys/types.h>
+#endif
+
+#include <ctime>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fstream>
-#include <sstream>
 #include <iostream>
-#include <stdio.h>
+#include <memory>
+#include <sstream>
 #include <stdlib.h>
 #include <string.h>
-#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <ctime>
+#include <iomanip>
+#include <locale>
+#include <vector>
 
 #include "Utils.hpp"
 
@@ -39,17 +51,42 @@
 #define RAMFS "resin/"
 #endif
 
+#define BUF_SIZE 0x800000 // 8MB.
 
+libget_progress_callback_t networking_callback = nullptr;
+int (*libget_status_callback)(int, int, int) = nullptr;
+void* networking_callback_data = nullptr; // User data to pass to callback
 
-#define BUF_SIZE 0x800000 //8MB.
+static const char* USER_AGENT = "libget-unknown/0.0.0";
 
-
-int (*networking_callback)(void*, double, double, double, double);
-int (*libget_status_callback)(int, int, int);
+// different signature depending on curl version
+#ifndef NETWORK_MOCK
+#if LIBCURL_VERSION_NUM >= 0x072000
+static int libget_curl_progress_wrapper(void* /*clientp*/, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t)
+#else
+static int libget_curl_progress_wrapper(void* /*clientp*/, double dltotal, double dlnow, double, double)
+#endif
+{
+	if (networking_callback == nullptr)
+		return 0;
+	
+	if (dltotal == 0)
+		return networking_callback(networking_callback_data, 0.0);
+	
+	double progress = (double)dlnow / (double)dltotal;
+	
+	// don't go OOB
+	if (progress > 1.0) {
+		progress = 1.0;
+	}
+	
+	return networking_callback(networking_callback_data, progress);
+}
+#endif
 
 // reference to the curl handle so that we can re-use the connection
 #ifndef NETWORK_MOCK
-CURL* curl = NULL;
+CURL* curl = nullptr;
 #endif
 
 #define SOCU_ALIGN 0x1000
@@ -60,7 +97,7 @@ CURL* curl = NULL;
 #endif
 
 #ifndef SO_WINSCALE
-#define SO_WINSCALE 0x00400 /* Set scaling window option */ 
+#define SO_WINSCALE 0x00400 /* Set scaling window option */
 #endif
 
 #ifndef SO_RCVBUF
@@ -70,12 +107,14 @@ CURL* curl = NULL;
 #ifndef NETWORK_MOCK
 // networking optimizations adapted from:
 //  - https://github.com/samdejong86/Arria-V-ADC-Ethernet-software/blob/master/ADC_Socket_bsp/iniche/src/h/socket.h
-int sockopt_callback(void *clientp, curl_socket_t curlfd, curlsocktype purpose)
+int sockopt_callback(void* clientp __attribute__((unused)), curl_socket_t curlfd, curlsocktype purpose __attribute__((unused)))
 {
-    int winscale = 1, rcvbuf = 0x20000, tcpsack = 1;
-    setsockopt(curlfd, SOL_SOCKET, SO_WINSCALE, &winscale, sizeof(int));
-    setsockopt(curlfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(int));
-    setsockopt(curlfd, SOL_SOCKET, SO_TCPSACK, &tcpsack, sizeof(int));
+	int winscale = 1, rcvbuf = 0x20000, tcpsack = 1;
+#ifndef WIN32
+	setsockopt(curlfd, SOL_SOCKET, SO_WINSCALE, &winscale, sizeof(int));
+	setsockopt(curlfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(int));
+	setsockopt(curlfd, SOL_SOCKET, SO_TCPSACK, &tcpsack, sizeof(int));
+#endif
 	return 0;
 }
 #endif
@@ -84,82 +123,273 @@ int sockopt_callback(void *clientp, curl_socket_t curlfd, curlsocktype purpose)
 u32* SOCUBuffer;
 #endif
 
-bool CreateSubfolder(char* cpath)
+// sets the user agent for our requests
+void setUserAgent(const char* agent)
 {
-	std::string path(cpath);
-	return mkpath(path);
+	USER_AGENT = agent;
+}
+
+bool CreateSubfolder(std::string_view path)
+{
+	return mkpath(path.data());
+}
+
+// wrapper for unix mkdir
+int my_mkdir(const std::string& path, int perms)
+{
+#if defined(WIN32)
+	return mkdir(path.c_str());
+#else
+	return mkdir(path.c_str(), perms);
+#endif
+}
+
+// platform independent strptime
+// https://stackoverflow.com/a/33542189
+char* my_strptime(const char* s,
+	const char* f,
+	struct tm* tm)
+{
+	if (!s || !f || !tm)
+		return nullptr;
+
+	// Common format used by libget repos: DD/MM/YYYY
+	if (strcmp(f, "%d/%m/%Y") == 0)
+	{
+		int d = 0, m = 0, y = 0;
+		if (sscanf(s, "%d/%d/%d", &d, &m, &y) == 3)
+		{
+			tm->tm_mday = d;
+			tm->tm_mon = m - 1;
+			tm->tm_year = y - 1900;
+			tm->tm_hour = 0;
+			tm->tm_min = 0;
+			tm->tm_sec = 0;
+			tm->tm_isdst = -1;
+			return (char*)(s + strlen(s));
+		}
+		return nullptr;
+	}
+
+	// Datetime format used by hpak repos: DD/MM/YYYY HH:MM (24hr)
+	if (strcmp(f, "%d/%m/%Y %H:%M") == 0)
+	{
+		int d = 0, m = 0, y = 0, hh = 0, mm = 0;
+		if (sscanf(s, "%d/%d/%d %d:%d", &d, &m, &y, &hh, &mm) == 5)
+		{
+			tm->tm_mday = d;
+			tm->tm_mon = m - 1;
+			tm->tm_year = y - 1900;
+			tm->tm_hour = hh;
+			tm->tm_min = mm;
+			tm->tm_sec = 0;
+			tm->tm_isdst = -1;
+			return (char*)(s + strlen(s));
+		}
+		return nullptr;
+	}
+
+	// Fallback: try ISO-like YYYY-MM-DD if encountered
+	if (strcmp(f, "%Y-%m-%d") == 0)
+	{
+		int y = 0, m = 0, d = 0;
+		if (sscanf(s, "%d-%d-%d", &y, &m, &d) == 3)
+		{
+			tm->tm_mday = d;
+			tm->tm_mon = m - 1;
+			tm->tm_year = y - 1900;
+			tm->tm_hour = 0;
+			tm->tm_min = 0;
+			tm->tm_sec = 0;
+			tm->tm_isdst = -1;
+			return (char*)(s + strlen(s));
+		}
+		return nullptr;
+	}
+
+	return nullptr;
 }
 
 // http://stackoverflow.com/a/11366985
-bool mkpath(std::string path)
+bool mkpath(const std::string& path)
 {
-	bool bSuccess = false;
-	int nRC = ::mkdir(path.c_str(), 0775);
-	if (nRC == -1)
+	if (path.empty())
+		return false;
+
+	std::string p = path;
+	// Trim trailing slashes (but keep root "/" or "sdmc:/")
+	while (p.size() > 1 && p.back() == '/')
 	{
-		switch (errno)
-		{
-		case ENOENT:
-			//parent didn't exist, try to create it
-			if (mkpath(path.substr(0, path.find_last_of('/'))))
-				//Now, try to create again.
-				bSuccess = 0 == ::mkdir(path.c_str(), 0775);
-			else
-				bSuccess = false;
+		// Keep "X:/" style roots
+		if (p.size() >= 2 && p[p.size() - 2] == ':')
 			break;
-		case EEXIST:
-			//Done!
-			bSuccess = true;
-			break;
-		default:
-			bSuccess = false;
-			break;
-		}
+		p.pop_back();
 	}
-	else
-		bSuccess = true;
-	return bSuccess;
+
+	if (p.empty() || p == "/" || p == ".")
+		return true;
+	// Drive/root like "sdmc:/" or "sdmc:"
+	if (p.size() >= 2 && p.back() == ':' )
+		return true;
+	if (p.size() >= 3 && p[p.size() - 2] == ':' && p.back() == '/')
+		return true;
+
+	int nRC = my_mkdir(p, 0775);
+	if (nRC == 0)
+		return true;
+
+	if (errno == EEXIST)
+		return true;
+
+	if (errno != ENOENT)
+		return false;
+
+	size_t pos = p.find_last_of('/');
+	if (pos == std::string::npos)
+		return false;
+
+	std::string parent = p.substr(0, pos);
+	if (parent.empty())
+	{
+		// Parent of "/foo" is root "/"
+		parent = "/";
+	}
+	else if (parent.size() >= 2 && parent.back() == ':')
+	{
+		// "sdmc:" -> "sdmc:/"
+		parent += "/";
+	}
+
+	if (parent == p)
+		return false;
+
+	if (!mkpath(parent))
+		return false;
+
+	nRC = my_mkdir(p, 0775);
+	return (nRC == 0 || errno == EEXIST);
 }
 
 #ifndef NETWORK_MOCK
+std::string tlsCaBundlePath()
+{
+#ifdef __SWITCH__
+	static const char* candidates[] = {
+		"sdmc:/kaihen/lib/cacert.pem",
+		"sdmc:/lib/cacert.pem",
+	};
+	for (auto path : candidates) {
+		struct stat st{};
+		if (stat(path, &st) == 0 && st.st_size > 0)
+			return path;
+	}
+	return "romfs:/util/cacert.pem";
+#else
+	// from https://github.com/GaryOderNichts/wiiu-examples/blob/main/curl-https/romfs/cacert.pem
+	return RAMFS "res/cacert.pem";
+#endif
+}
+
 void setPlatformCurlFlags(CURL* c)
 {
-	// // from https://github.com/GaryOderNichts/wiiu-examples/blob/main/curl-https/romfs/cacert.pem
-	curl_easy_setopt(c, CURLOPT_CAINFO, RAMFS "res/cacert.pem");
+	curl_easy_setopt(c, CURLOPT_CAINFO, tlsCaBundlePath().c_str());
+	curl_easy_setopt(c, CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
 
-	curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
+	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); // follow redirects
+
+	// set the user agent
+	curl_easy_setopt(c, CURLOPT_USERAGENT, USER_AGENT);
+}
+
+// reset curl handle to a clean state to prevent state pollution between requests
+void resetCurlToCleanState(CURL* c)
+{
+	if (!c) return;
+		
+	// clear callbacks which might reference freed objects
+	curl_easy_setopt(c, COMPAT_CURL_PROGRESS_OPTION, nullptr);
+	curl_easy_setopt(c, CURLOPT_PROGRESSDATA, nullptr);
+	curl_easy_setopt(c, CURLOPT_NOPROGRESS, 1);
+	
+	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, nullptr);
+	curl_easy_setopt(c, CURLOPT_HEADERDATA, nullptr);
+	
+	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, nullptr);
+	curl_easy_setopt(c, CURLOPT_WRITEDATA, nullptr);
+	
+	curl_easy_setopt(c, CURLOPT_HTTPHEADER, nullptr);
+	curl_easy_setopt(c, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)0);
+	curl_easy_setopt(c, CURLOPT_NOBODY, 0L);
+	
+	curl_easy_setopt(c, CURLOPT_URL, nullptr);
+	
+	// platform-specific flags are left set as they should persist across all requests
 }
 #endif
 
 static size_t MemoryWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
 {
- 	((std::string*)userp)->append((char*)contents, size * nmemb);
- 	return size * nmemb;
+	((std::string*)userp)->append((char*)contents, size * nmemb);
+	return size * nmemb;
+}
+
+// used to fill out our metadata files for partial download support
+static size_t HeaderCallback(void* contents, size_t size, size_t nmemb, void* userp)
+{
+	auto* metadata = (download_metadata_t*)userp;
+	size_t realsize = size * nmemb;
+	std::string header((char*)contents, realsize);
+	
+	if (header.find("ETag:") == 0 || header.find("etag:") == 0) {
+		size_t start = header.find(':') + 1;
+		size_t end = header.find('\r', start);
+		if (end == std::string::npos) end = header.find('\n', start);
+		if (start != std::string::npos && end != std::string::npos) {
+			metadata->etag = header.substr(start, end - start);
+			metadata->etag.erase(0, metadata->etag.find_first_not_of(" \t"));
+			metadata->etag.erase(metadata->etag.find_last_not_of(" \t\r\n") + 1);
+		}
+	}
+	else if (header.find("Last-Modified:") == 0 || header.find("last-modified:") == 0) {
+		size_t start = header.find(':') + 1;
+		size_t end = header.find('\r', start);
+		if (end == std::string::npos) end = header.find('\n', start);
+		if (start != std::string::npos && end != std::string::npos) {
+			metadata->last_modified = header.substr(start, end - start);
+			metadata->last_modified.erase(0, metadata->last_modified.find_first_not_of(" \t"));
+			metadata->last_modified.erase(metadata->last_modified.find_last_not_of(" \t\r\n") + 1);
+		}
+	}
+	
+	return realsize;
 }
 
 static size_t DiskWriteCallback(void* contents, size_t size, size_t num_files, void* userp)
 {
-	ntwrk_struct_t *data_struct = (ntwrk_struct_t *)userp;
-    size_t realsize = size * num_files;
+	auto* data_struct = (ntwrk_struct_t*)userp;
+	size_t realsize = size * num_files;
 
 	if (realsize + data_struct->offset >= data_struct->data_size)
-    {
-        fwrite(data_struct->data, data_struct->offset, 1, data_struct->out);
-        data_struct->offset = 0;
-    }
+	{
+		fwrite(data_struct->data, data_struct->offset, 1, data_struct->out);
+		data_struct->offset = 0;
+	}
 
-    memcpy(&data_struct->data[data_struct->offset], contents, realsize);
-    data_struct->offset += realsize;
-    data_struct->data[data_struct->offset] = 0;
-    return realsize;
+	memcpy(&data_struct->data[data_struct->offset], contents, realsize);
+	data_struct->offset += realsize;
+	data_struct->data[data_struct->offset] = 0;
+	return realsize;
 }
 
 // https://gist.github.com/alghanmi/c5d7b761b2c9ab199157
 // if data_struct is specified, file will go straight to disk as it downloads
-bool downloadFileCommon(std::string path, std::string* buffer = NULL, ntwrk_struct_t* data_struct = NULL)
+bool downloadFileCommon(const std::string& path, std::string* buffer = nullptr, ntwrk_struct_t* data_struct = nullptr)
 {
 #ifndef NETWORK_MOCK
-	CURLcode res;
+	if (!buffer && !data_struct)
+	{
+		return false;
+	}
 
 	if (!curl)
 		return false;
@@ -167,10 +397,20 @@ bool downloadFileCommon(std::string path, std::string* buffer = NULL, ntwrk_stru
 	setPlatformCurlFlags(curl);
 
 	curl_easy_setopt(curl, CURLOPT_URL, path.c_str());
-	curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, networking_callback);
-	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0);
+	
+	if (networking_callback != nullptr) {
+		printf("[downloadFileCommon] Setting progress callback (networking_callback=%p)\n", networking_callback);
+		curl_easy_setopt(curl, COMPAT_CURL_PROGRESS_OPTION, libget_curl_progress_wrapper);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, curl);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0);
+	} else {
+		printf("[downloadFileCommon] Disabling progress callbacks (networking_callback is nullptr)\n");
+		curl_easy_setopt(curl, COMPAT_CURL_PROGRESS_OPTION, nullptr);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, nullptr);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
+	}
 
-	bool skipDisk = data_struct == NULL;
+	bool skipDisk = data_struct == nullptr;
 
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, skipDisk ? MemoryWriteCallback : DiskWriteCallback);
 
@@ -179,45 +419,248 @@ bool downloadFileCommon(std::string path, std::string* buffer = NULL, ntwrk_stru
 	else
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, data_struct);
 
-	return curl_easy_perform(curl) == CURLE_OK;
+	bool success = curl_easy_perform(curl) == CURLE_OK;
+	
+	resetCurlToCleanState(curl);
+	
+	return success;
 #else
-  return true;
+	return true;
 #endif
 }
 
-bool downloadFileToMemory(std::string path, std::string* buffer)
+bool downloadFileToMemory(const std::string& path, std::string* buffer)
 {
-	return downloadFileCommon(path, buffer, NULL);
+	return downloadFileCommon(path, buffer, nullptr);
 }
 
-bool downloadFileToDisk(std::string remote_path, std::string local_path)
+bool downloadFileToDisk(const std::string& remote_path, const std::string& local_path, bool resume)
 {
-	FILE *out_file = fopen(local_path.c_str(), "wb");
+	long resume_from = 0;
+	
+	if (resume)
+	{
+		struct stat file_info = {};
+		if (stat(local_path.c_str(), &file_info) == 0)
+		{
+			resume_from = file_info.st_size;
+			printf("--> Resuming download from byte %ld\n", resume_from);
+		}
+	}
+	
+	// either append or write mode depending on resuming status
+	FILE* out_file = fopen(local_path.c_str(), resume && resume_from > 0 ? "ab" : "wb");
 	if (!out_file)
 		return false;
 
-	uint8_t *buf = (uint8_t *)malloc(BUF_SIZE); // 8MB.
-	if (buf == NULL)
+	// automatically close the file if it leaves the scope.
+	auto file = std::unique_ptr<FILE, int (*)(FILE*)>(out_file, &::fclose);
+
+	auto buf = std::make_unique<uint8_t[]>(BUF_SIZE); // 8MB.
+	if (buf == nullptr)
 	{
-		fclose(out_file);
 		return false;
 	}
 
-	ntwrk_struct_t data_struct = { buf, BUF_SIZE, 0, out_file };
+	ntwrk_struct_t data_struct = { buf.get(), BUF_SIZE, 0, out_file };
 
-	if (!downloadFileCommon(remote_path, NULL, &data_struct))
+#ifndef NETWORK_MOCK
+	if (resume && resume_from > 0)
 	{
-		free(data_struct.data);
-		fclose(data_struct.out);
+		curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)resume_from);
+	}
+	else
+	{
+		// no resume
+		curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)0);
+	}
+#endif
+
+	if (!downloadFileCommon(remote_path, nullptr, &data_struct))
+	{
 		return false;
 	}
 
-	// write remaning data to file before free.
-    fwrite(data_struct.data, data_struct.offset, 1, data_struct.out);
-    free(data_struct.data);
-	fclose(data_struct.out);
-
+	// write remaining data to file before free.
+	fwrite(data_struct.data, data_struct.offset, 1, data_struct.out);
 	return true;
+}
+
+std::string getMetadataPath(const std::string& filepath)
+{
+	return filepath + ".metadata";
+}
+
+bool saveDownloadMetadata(const std::string& filepath, const download_metadata_t& metadata)
+{
+	std::string metapath = getMetadataPath(filepath);
+	std::ofstream metafile(metapath);
+	if (!metafile)
+		return false;
+	
+	metafile << "etag=" << metadata.etag << std::endl;
+	metafile << "last_modified=" << metadata.last_modified << std::endl;
+	metafile << "content_length=" << metadata.content_length << std::endl;
+	
+	return true;
+}
+
+bool loadDownloadMetadata(const std::string& filepath, download_metadata_t* metadata)
+{
+	std::string metapath = getMetadataPath(filepath);
+	std::ifstream metafile(metapath);
+	if (!metafile)
+		return false;
+	
+	std::string line;
+	while (std::getline(metafile, line))
+	{
+		// basic .ini-ish key=value parsing
+		auto pos = line.find('=');
+		if (pos != std::string::npos)
+		{
+			std::string key = line.substr(0, pos);
+			std::string value = line.substr(pos + 1);
+			
+			if (key == "etag")
+				metadata->etag = value;
+			else if (key == "last_modified")
+				metadata->last_modified = value;
+			else if (key == "content_length")
+				metadata->content_length = std::stol(value);
+		}
+	}
+	
+	return true;
+}
+
+// performs a blocking HEAD request to get remote file metadata
+bool getRemoteFileMetadata(const std::string& remote_path, download_metadata_t* metadata)
+{
+#ifndef NETWORK_MOCK
+	if (!curl || !metadata)
+		return false;
+	
+	setPlatformCurlFlags(curl);
+	
+	curl_easy_setopt(curl, CURLOPT_URL, remote_path.c_str());
+	curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // HEAD request
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
+	curl_easy_setopt(curl, CURLOPT_HEADERDATA, metadata);
+	
+	CURLcode res = curl_easy_perform(curl);
+	
+	// reset curl to clean state for next time
+	resetCurlToCleanState(curl);
+	
+	if (res == CURLE_OK) {
+		// the target file size
+		curl_off_t content_length = 0;
+		curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &content_length);
+		metadata->content_length = content_length;
+		return true;
+	}
+#endif
+	return false;
+}
+
+// downloads happen metadata being observed, but not necessarily saved
+bool downloadFileToDiskWithMetadata(const std::string& remote_path, const std::string& local_path, bool resume, download_metadata_t* metadata)
+{
+	long resume_from = 0;
+	download_metadata_t old_metadata = {};
+	
+	if (resume)
+	{
+		struct stat file_info = {};
+		if (stat(local_path.c_str(), &file_info) == 0)
+		{
+			resume_from = file_info.st_size;
+			
+			// validate existing metadat first
+			if (loadDownloadMetadata(local_path, &old_metadata))
+			{
+				printf("--> Found existing download metadata (ETag: %s)\n", old_metadata.etag.c_str());
+			} else {
+				// no metadata found, cannot resume (old clients might have partials without metadata)
+				resume_from = 0;
+			}
+			
+			printf("--> Resuming download from byte %ld\n", resume_from);
+		}
+	}
+	
+	// open our tmp data in append mode if resuming, otherwise write mode
+	FILE* out_file = fopen(local_path.c_str(), resume && resume_from > 0 ? "ab" : "wb");
+	if (!out_file)
+		return false;
+
+	// automatically close the file if it leaves the scope.
+	auto file = std::unique_ptr<FILE, int (*)(FILE*)>(out_file, &::fclose);
+
+	auto buf = std::make_unique<uint8_t[]>(BUF_SIZE); // 8MB.
+	if (buf == nullptr)
+	{
+		return false;
+	}
+
+	ntwrk_struct_t data_struct = { buf.get(), BUF_SIZE, 0, out_file };
+
+#ifndef NETWORK_MOCK
+	if (metadata) {
+		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
+		curl_easy_setopt(curl, CURLOPT_HEADERDATA, metadata);
+	}
+	
+	struct curl_slist* headers = nullptr;
+	if (resume && resume_from > 0)
+	{
+		curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)resume_from);
+		
+		// If-Range header with etag if we have it
+		if (!old_metadata.etag.empty())
+		{
+			std::string if_range = "If-Range: " + old_metadata.etag;
+			headers = curl_slist_append(headers, if_range.c_str());
+			curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+		}
+	}
+	else
+	{
+		// Don't use resuming if it's not enabled
+		curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)0);
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+	}
+#endif
+
+	bool success = downloadFileCommon(remote_path, nullptr, &data_struct);
+
+	// write remaining data to file before free.
+	fwrite(data_struct.data, data_struct.offset, 1, data_struct.out);
+	
+#ifndef NETWORK_MOCK
+	// store content-length
+	if (success && metadata)
+	{
+		curl_off_t content_length = 0;
+		curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &content_length);
+		if (content_length > 0) {
+			metadata->content_length = content_length + resume_from; // Total expected size
+		}
+	}
+	
+	if (headers) {
+		curl_slist_free_all(headers);
+		headers = nullptr;
+	}
+	
+	// reset curl to clean state
+	resetCurlToCleanState(curl);
+#endif
+	
+	// saveDownloadMetadata() must be explicitly called to save the file
+	
+	return success;
 }
 
 const char* plural(int amount)
@@ -225,10 +668,10 @@ const char* plural(int amount)
 	return (amount == 1) ? "" : "s";
 }
 
-const std::string dir_name(std::string file_path)
+std::string dir_name(const std::string& file_path)
 {
 	// turns "/hi/man/thing.txt to /hi/man"
-	size_t pos = file_path.find_last_of("/");
+	size_t pos = file_path.find_last_of('/');
 
 	// no "/" in string, return empty string
 	if (pos == std::string::npos)
@@ -281,6 +724,10 @@ int deinit_networking()
 	wiisocket_deinit();
 #endif
 
+#if defined(SWITCH)
+	socketExit();
+#endif
+
 	return 1;
 }
 
@@ -290,13 +737,6 @@ void cp(const char* from, const char* to)
 	std::ofstream dst(to, std::ios::binary);
 
 	dst << src.rdbuf();
-}
-
-std::string toLower(const std::string& str)
-{
-	std::string lower;
-	transform(str.begin(), str.end(), std::back_inserter(lower), tolower);
-	return lower;
 }
 
 int remove_empty_dirs(const char* name, int count)
@@ -315,10 +755,12 @@ int remove_empty_dirs(const char* name, int count)
 	if (!(dir = opendir(name)))
 		return true;
 
+	auto dirclose_handler = std::unique_ptr<DIR, int (*)(DIR*)>(dir, &::closedir);
+
 	// go through files in directory
-	while ((entry = readdir(dir)) != NULL)
+	while ((entry = readdir(dir)) != nullptr)
 	{
-		if (entry->d_type == DT_DIR)
+		if (is_dir(name, entry))
 		{
 			char path[1024];
 			// skip current dir or parent dir
@@ -345,8 +787,6 @@ int remove_empty_dirs(const char* name, int count)
 		rmdir(name);
 	}
 
-	closedir(dir);
-
 	// return number of files at this level (total count minus starting)
 	return count - starting_count;
 }
@@ -356,9 +796,9 @@ bool libget_reset_data(const char* path)
 	time_t seconds;
 	time(&seconds);
 
-	long int current_time = static_cast<long int>(seconds);
+	auto current_time = static_cast<long int>(seconds);
 
-  // move the contents of the .get folder to .trash/get_backup_date
+	// move the contents of the .get folder to .trash/get_backup_date
 	std::stringstream ss;
 	ss << ".trash/get_backup_" << current_time;
 	printf("--> Info: %ld\n", current_time);
@@ -367,7 +807,7 @@ bool libget_reset_data(const char* path)
 
 	std::stringstream ss2;
 	ss2 << path << "../.trash";
-	mkpath(ss2.str().c_str());
+	mkpath(ss2.str());
 
 	int res = std::rename(path, ss.str().c_str());
 	if (res == 0)
@@ -376,4 +816,177 @@ bool libget_reset_data(const char* path)
 		printf("Issue renaming folder... %d: %s\n", errno, strerror(errno));
 
 	return !res;
+}
+
+bool is_dir(std::string_view path __attribute__((unused)), struct dirent* entry)
+{
+#ifndef WIN32
+	return entry->d_type & DT_DIR;
+#else
+	// windows check, using stat
+	struct stat s;
+	// get full path using dir and entry
+	std::string full_path = std::string(path) + "/" + std::string(entry->d_name);
+	stat(full_path.c_str(), &s);
+	return s.st_mode & S_IFDIR;
+#endif
+}
+
+std::string getHumanReadableBytes(uint64_t bytes)
+{
+	const char* suffixes[] = { "bytes", "KB", "MB", "GB", "TB" };
+	int suffix = 0;
+	double size = bytes;
+
+	while (size >= 1024 && suffix < 4)
+	{
+		size /= 1024;
+		suffix++;
+	}
+
+	std::stringstream ss;
+	// limit to up to 2 decimal places
+	int places = 0;
+    double fractional_part = size - static_cast<int>(size);
+    if (fractional_part > 0) {
+		// there's a decimal component, set to either 1 or 2
+        places = (fractional_part * 100 >= 1) ? 2 : 1;
+    }
+	ss.precision(places);
+	ss << std::fixed << size << " " << suffixes[suffix];
+	return ss.str();
+}
+
+static std::string trimCopy(const std::string& s)
+{
+	const auto start = s.find_first_not_of(" \t\r\n");
+	if (start == std::string::npos)
+		return "";
+	const auto end = s.find_last_not_of(" \t\r\n");
+	return s.substr(start, end - start + 1);
+}
+
+static std::vector<std::string> splitVersionParts(const std::string& s)
+{
+	std::vector<std::string> parts;
+	std::string current;
+	for (char c : s)
+	{
+		if (c == '.')
+		{
+			parts.push_back(current);
+			current.clear();
+		}
+		else
+		{
+			current.push_back(c);
+		}
+	}
+	parts.push_back(current);
+	return parts;
+}
+
+bool parseNumericVersion(const std::string& in, int outSegments[4], int& outCount)
+{
+	outSegments[0] = outSegments[1] = outSegments[2] = outSegments[3] = 0;
+	outCount = 0;
+
+	size_t pos = 0;
+	while (pos < in.size() && (in[pos] == ' ' || in[pos] == '\t' || in[pos] == '\r' || in[pos] == '\n'))
+		pos++;
+	if (pos < in.size() && (in[pos] == 'v' || in[pos] == 'V'))
+		pos++;
+
+	int count = 0;
+	while (pos <= in.size() && count < 5)
+	{
+		// read leading digit run of this segment
+		size_t start = pos;
+		while (pos < in.size() && in[pos] >= '0' && in[pos] <= '9')
+			pos++;
+		if (pos == start)
+			break; // no digits: end of version core (suffix or invalid)
+		if (pos - start > 9)
+			return false; // absurdly large segment
+		if (count >= 4)
+			return false; // more than 4 numeric segments
+		outSegments[count++] = std::atoi(in.substr(start, pos - start).c_str());
+		if (pos >= in.size() || in[pos] != '.')
+			break;
+		pos++; // skip '.'
+	}
+
+	if (count < 1 || count > 4)
+		return false;
+	outCount = count;
+	return true;
+}
+
+int compareVersions(const std::string& a, const std::string& b)
+{
+	int aseg[4], bseg[4], acount, bcount;
+	if (parseNumericVersion(a, aseg, acount) && parseNumericVersion(b, bseg, bcount))
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			if (aseg[i] != bseg[i])
+				return (aseg[i] > bseg[i]) ? 1 : -1;
+		}
+		return 0;
+	}
+	// Non-numeric versions (e.g. tags): equal strings mean up to date,
+	// anything else is treated as newer (preserves legacy update behavior).
+	return (a == b) ? 0 : 1;
+}
+
+bool versionsEqual(const std::string& a, const std::string& b)
+{
+	return compareVersions(a, b) == 0;
+}
+
+bool versionSatisfies(const std::string& version, const std::string& constraint)
+{
+	std::string c = trimCopy(constraint);
+	if (c.empty() || c == "*" || c == "x" || c == "X")
+		return true;
+
+	// Constraint: 1-4 segments, each numeric or a wildcard.
+	auto cparts = splitVersionParts(c);
+	if (cparts.empty() || cparts.size() > 4)
+		return false;
+	struct ConstraintSeg { bool wildcard; int value; };
+	ConstraintSeg cspec[4];
+	for (size_t i = 0; i < cparts.size(); i++)
+	{
+		std::string s = trimCopy(cparts[i]);
+		if (s == "x" || s == "X" || s == "*")
+		{
+			cspec[i] = {true, 0};
+			continue;
+		}
+		if (s.empty())
+			return false;
+		for (char ch : s)
+			if (ch < '0' || ch > '9')
+				return false;
+		if (s.size() > 9)
+			return false;
+		cspec[i] = {false, std::atoi(s.c_str())};
+	}
+
+	int vseg[4], vcount;
+	if (!parseNumericVersion(version, vseg, vcount))
+		return false;
+
+	// Compare only the segments the constraint specifies (prefix semantics,
+	// so "1.0" accepts "1.0.x"); missing version segments count as 0.
+	for (size_t i = 0; i < cparts.size(); i++)
+	{
+		if (cspec[i].wildcard)
+			continue;
+		if (cspec[i].value != vseg[i])
+			return false;
+	}
+
+	return true;
 }

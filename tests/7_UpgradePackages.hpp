@@ -7,7 +7,7 @@ class UpgradePackages : public Test {
 	}
 	bool execute()
 	{
-		get->toggleRepo(get->repos[1]);
+		get->toggleRepo(*get->getRepos()[1]);
 
 		if (count(get, INSTALLED) != 2 || count(get, GET) != 1)
 		{
@@ -24,7 +24,7 @@ class UpgradePackages : public Test {
 			return false;
 		}
 
-		get->toggleRepo(get->repos[3]);
+		get->toggleRepo(*get->getRepos()[3]);
 
 		// this new repo has a collision for the "one" package, with a newer update available
 
@@ -58,8 +58,6 @@ class UpgradePackages : public Test {
 			return false;
 		}
 
-    // TODO: this test is good! but the code is bad, see issue https://github.com/vgmoose/libget/issues/8
-    // TODO: uncomment these tests, and fix the bug in the code so they pass
 		ok = true;
 		ok &= exists("sdroot/dir2/x");
 		ok &= exists("sdroot/newdir/dogs");
@@ -73,6 +71,11 @@ class UpgradePackages : public Test {
 			error << "(2) After upgrading, some unexpected files were left behind" << endl;
 			return false;
 		}
+
+		// clean up the rest of the files directly on sdroot
+		remove("sdroot/dir2/x");
+		remove("sdroot/newdir/dogs");
+		remove("sdroot/dir2/mario");
 		
 		return true;
 	}

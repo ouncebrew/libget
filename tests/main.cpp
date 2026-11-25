@@ -10,18 +10,28 @@
 #include "6_RemovePackages.hpp"
 #include "7_UpgradePackages.hpp"
 #include "8_ContentTest.hpp"
+#include "9_FakeManifestTest.hpp"
+#include "10_FakeManifestUpgrade.hpp"
+#include "11_PackagesSorted.hpp"
+#include "12_RepoAddAndRemove.hpp"
+#include "13_ResumeDownloadTest.hpp"
+#include "14_LargeDownloadProgressTest.hpp"
+
 
 using namespace std;
 
 // This testing suite depends on a server to serve the contents of
 // the "server" folder. There's a server.sh script that will do this
 
-void summarize(Test* test)
+void summarize(Test& test)
 {
-	if (test->passed) {
-		cout << "✅ Test [" << test->purpose << "] passed!" << endl;
-	} else {
-		cout << "❌ Test [" << test->purpose << "] failed: " << test->error.str() << endl;
+	if (test.passed)
+	{
+		cout << "✅ Test [" << test.purpose << "] passed!" << endl;
+	}
+	else
+	{
+		cout << "❌ Test [" << test.purpose << "] failed: " << test.error.str() << endl;
 	}
 }
 
@@ -30,7 +40,11 @@ int main()
 	init_networking();
 
 	// create a Get object
-	Get* get = new Get("./tests/.get/", URL "a");
+	Get get("./tests/.get/", URL "a");
+
+	// print all repos:
+	for (auto& repo : get.getRepos())
+		cout << repo->getUrl() << endl;
 
 	// all the tests are "system" tests, even though this
 	// main test suite is linked against the libget library (and so
@@ -38,16 +52,21 @@ int main()
 	// tests' states, and also don't clean themselves up.
 	// due to this dependency, if one fails, the rest don't execute
 	// they will always run in the order defined here, though
-	vector<Test*> tests = {
-		new InitCheck(),
-		new CheckPackages(),
-		new InstallPackages(),
-		new InstallPackages2(),
-		new Search(),
-		new RemovePackages(),
-		new UpgradePackages(),
-    new ContentTest()
-	};
+	vector<std::unique_ptr<Test>> tests ;
+	tests.push_back(std::make_unique<InitCheck>());
+	tests.push_back(std::make_unique<CheckPackages>());
+	tests.push_back(std::make_unique<InstallPackages>());
+	tests.push_back(std::make_unique<InstallPackages2>());
+	tests.push_back(std::make_unique<Search>());
+	tests.push_back(std::make_unique<RemovePackages>());
+	tests.push_back(std::make_unique<UpgradePackages>());
+	tests.push_back(std::make_unique<ContentTest>());
+	tests.push_back(std::make_unique<FakeManifestTest>());
+	tests.push_back(std::make_unique<FakeManifestUpgradeTest>());
+	tests.push_back(std::make_unique<ResumeDownloadTest>());
+	tests.push_back(std::make_unique<LargeDownloadProgressTest>());
+	// tests.push_back(std::make_unique<PackagesSortedTest>());
+	// tests.push_back(std::make_unique<RepoAddAndRemoveTest>());
 
 	// main test loop that goes through all our tests, and prints out
 	// their status with a happy friendly emoji
@@ -56,7 +75,7 @@ int main()
 
 	for (auto& test : tests)
 	{
-		test->get = get;
+		test->get = &get;
 		count += 1;
 
 		cout << "---------------------------" << endl;
@@ -68,8 +87,9 @@ int main()
 		test->passed = success;
 
 		cout << "---------------------------" << endl;
-		summarize(test);
-		cout << "---------------------------" << endl << endl;
+		summarize(*test);
+		cout << "---------------------------" << endl
+			 << endl;
 
 		// update failcount with status
 		failCount += !success;
@@ -79,7 +99,7 @@ int main()
 	cout << "Test Suite Summary!" << endl;
 	cout << "===========================" << endl;
 	for (auto& test : tests)
-		summarize(test);
+		summarize(*test);
 	cout << "===========================" << endl;
 	cout << count << " tests executed, " << (count - failCount) << " passed, " << failCount << " failed." << endl;
 

@@ -1,6 +1,5 @@
 #include "tests.hpp"
 
-#include <openssl/md5.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/mman.h>
@@ -13,26 +12,26 @@
 int count(Get* get, int state)
 {
 	int count = 0;
-	for (int x = 0; x < get->packages.size(); x++)
-		if (get->packages[x]->status == state)
+	for (auto const& package : get->getPackages())
+		if (package->getStatus() == state)
 			count++;
 	return count;
 }
 
 bool install(Get* get, const char* name)
 {
-	for (int x = 0; x < get->packages.size(); x++)
-		if (get->packages[x]->pkg_name == name)
-			return get->install(get->packages[x]);
+	for (auto const& package : get->getPackages())
+		if (package->getPackageName() == name)
+			return get->install(*package);
 
 	return false;
 }
 
 bool remove(Get* get, const char* name)
 {
-	for (int x = 0; x < get->packages.size(); x++)
-		if (get->packages[x]->pkg_name == name)
-			return get->remove(get->packages[x]);
+	for (auto const& package : get->getPackages())
+		if (package->getPackageName() == name)
+			return get->remove(*package);
 
 	return false;
 }
@@ -55,25 +54,36 @@ unsigned long get_size_by_fd(int fd) {
 
 std::string calculateMD5(const char* path)
 {
-  int file_descript;
-  unsigned long file_size;
-  char* file_buffer;
+  // use  
+// extern void MD5_Init(MD5_CTX *ctx);
+// extern void MD5_Update(MD5_CTX *ctx, const void *data, unsigned long size);
+// extern void MD5_Final(unsigned char *result, MD5_CTX *ctx);
+// to calculate the md5 sum of the file at path
 
-  file_descript = open(path, O_RDONLY);
-  if(file_descript < 0) exit(-1);
+    auto file = fopen(path, "rb");
+    if (!file) {
+        return "";
+    }
+    auto fd = fileno(file);
+    auto size = get_size_by_fd(fd);
+    auto ptr = mmap(0, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (ptr == MAP_FAILED) {
+        return "";
+    }
 
-  file_size = get_size_by_fd(file_descript);
+    MD5_CTX ctx;
+    MD5_Init(&ctx);
+    MD5_Update(&ctx, ptr, size);
+    unsigned char result[16];
+    MD5_Final(result, &ctx);
+    munmap(ptr, size);
+    fclose(file);
 
-  unsigned char result[MD5_DIGEST_LENGTH];
-
-  file_buffer = static_cast<char*>(mmap(0, file_size, PROT_READ, MAP_SHARED, file_descript, 0));
-  MD5((unsigned char*) file_buffer, file_size, result);
-
-  int i;
-  std::stringstream ss;
-  for(i=0; i <MD5_DIGEST_LENGTH; i++) {
-    ss << std::hex << std::setfill('0') << (int)result[i];
-  }
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (auto i = 0; i < 16; ++i) {
+        ss << std::setw(2) << static_cast<unsigned>(result[i]);
+    }
 
   return ss.str();
 }
